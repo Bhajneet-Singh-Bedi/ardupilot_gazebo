@@ -552,113 +552,109 @@ void MotorPlugin::PreUpdate(
   double torque=0.0;
     
     // gzdbg << "This is Dt:- " << dt << "\n";
-		for (size_t i = 0; i < this->impl->controls.size(); ++i)
-		{
-			auto &control = this->impl->controls[i];
-			double vel = 0.0;
-			
-			auto joint_vel_comp = _ecm.Component<gz::sim::components::JointVelocity>(control.joint);
-			if (!joint_vel_comp)
-			{
-				gzerr << "JointVelocity component missing for joint [" << control.jointName << "]\n";
-				return;
-			}
+    for (size_t i = 0; i < this->impl->controls.size(); ++i)
+    {
+        auto &control = this->impl->controls[i];
+        double vel = 0.0;
+        
+        auto joint_vel_comp = _ecm.Component<gz::sim::components::JointVelocity>(control.joint);
+        if (!joint_vel_comp)
+        {
+            gzerr << "JointVelocity component missing for joint [" << control.jointName << "]\n";
+            return;
+        }
 
-			const auto &velocities = joint_vel_comp->Data();
-			if (velocities.empty())
-			{
-				gzerr << "Empty velocities for joint [" << control.jointName << "]\n";
-				continue;
-			}
+        const auto &velocities = joint_vel_comp->Data();
+        if (velocities.empty())
+        {
+            gzerr << "Empty velocities for joint [" << control.jointName << "]\n";
+            continue;
+        }
 
-			// current joint speed (rpm)
-			double currOmega = velocities[0];
-			
-			std::string topic = "/" + this->impl->topics[i];
-      std::lock_guard<std::mutex> lock(this->impl->pwmMutex);
-      auto it = this->impl->pwmValues.find(topic);
-      if (it != this->impl->pwmValues.end())
-      {
+        // current joint speed (rpm)
+        double currOmega = velocities[0];
+        
+        std::string topic = "/" + this->impl->topics[i];
+        std::lock_guard<std::mutex> lock(this->impl->pwmMutex);
+        auto it = this->impl->pwmValues.find(topic);
+        if (it != this->impl->pwmValues.end())
+        {
         try
         {
-          vel = std::stod(it->second);
+            vel = std::stod(it->second);
         }
         catch (const std::exception &e)
         {
-          gzwarn << "Failed to convert PWM value for topic [" << topic << "]: " << e.what() << "\n";
-          vel = 0.0;
+            gzwarn << "Failed to convert PWM value for topic [" << topic << "]: " << e.what() << "\n";
+            vel = 0.0;
         }
-      }
+        }
 
-			double targetOmega = vel;
+        double targetOmega = vel;
 
-      
-			if (std::abs(vel) < 1.0) 
-			{
-				// gzdbg << "Zero rad/s PWM from topic, setting torque to 0\n";
-				auto jfcComp = _ecm.Component<gz::sim::components::JointForceCmd>(control.joint);
-				if (jfcComp)
-				{
-					auto &forceCmd = jfcComp->Data();
-					if (!forceCmd.empty())
-					{
-						forceCmd[0] = 0.0;
-					}
-				}
-				continue;
-			}
-      
-			double velError = currOmega - targetOmega;
-			double torque = this->impl->pid.Update(
+    
+        if (std::abs(vel) < 0.1) 
+        {
+            // gzdbg << "Zero rad/s PWM from topic, setting torque to 0\n";
+            auto jfcComp = _ecm.Component<gz::sim::components::JointForceCmd>(control.joint);
+            if (jfcComp)
+            {
+                auto &forceCmd = jfcComp->Data();
+                if (!forceCmd.empty())
+                {
+                    forceCmd[0] = 0.0;
+                }
+            }
+            continue;
+        }
+    
+        double velError = currOmega - targetOmega;
+        double torque = this->impl->pid.Update(
         velError, _info.dt);
-			
-      // outMin + (outMax - outMin) * ((value - inMin) / (inMax - inMin))
-      double kv = (control.speedConstant * (2.0 * M_PI)) / 60.0;
-      double true_pwm = 0 + (1 - 0) * ((abs(vel) - 0) / (control.multiplier - 0));
-      
-      if (vel < 0)
-        true_pwm = -true_pwm;
-      
-      double voltage = control.voltageBat * true_pwm;
-      
-			double backEmfV = currOmega / kv ;  // Ω/KV
-			double current = (voltage - backEmfV) / control.resistance;
-      
-      msgs::Double cmd;
-      cmd.set_data(current);
-      control.pub_c.Publish(cmd);
+            
+        double kv = (control.speedConstant * (2.0 * M_PI)) / 60.0;
+        double true_pwm = (vel / control.multiplier) - control.offset;
+        
+        double voltage = control.voltageBat * true_pwm;
+    
+        double backEmfV = currOmega / kv ;  // Ω/KV
+        double current = (voltage - backEmfV) / control.resistance;
+    
+        msgs::Double cmd;
+        cmd.set_data(current);
+        control.pub_c.Publish(cmd);
+
+        // voltage output
+        // msgs::Double cmd_v;
+        // cmd_v.set_data(voltage);
+        // control.pub_v.Publish(cmd_v);
+        
+        ////////////////////////////////////////////////// -> motor model eqns.
+        // if (current >= control.noLoadCurrent)
+        // {
+        //   torque = (current - control.noLoadCurrent) / kv;
+        // }
+        // else
+        // {
+        //   torque = (current + control.noLoadCurrent) / kv;
+        // }
+        /////////////////////////////////////////////////
 
 
-      msgs::Double cmd_v;
-      cmd_v.set_data(voltage);
-      control.pub_v.Publish(cmd_v);
-      
-      ////////////////////////////////////////////////// -> motor model eqns.
-      // if (current >= control.noLoadCurrent)
-      // {
-      //   torque = (current - control.noLoadCurrent) / kv;
-      // }
-      // else
-      // {
-      //   torque = (current + control.noLoadCurrent) / kv;
-      // }
-      /////////////////////////////////////////////////
+        // gzdbg << "Curr Speed:- " << currOmega << " Pwm:- "<< true_pwm << " Torque:- " << torque << " Voltage:- " << voltage << " Current:- " << current << "\n";
 
-
-      gzdbg << "True Pwm:- "<< true_pwm << " Torque:- " << torque << "Voltage:- " << voltage <<  "\n";
-
-			// Apply torque to joint
-			auto jfcComp = _ecm.Component<gz::sim::components::JointForceCmd>(control.joint);
-			if (jfcComp)
-			{
-				auto &forceCmd = jfcComp->Data();
-				forceCmd[0] = torque;
-			}
-			else
-			{
-				gzerr << "JointForceCmd component missing for joint [" << control.jointName << "]\n";
-			}
-		}
+        // Apply torque to joint
+        auto jfcComp = _ecm.Component<gz::sim::components::JointForceCmd>(control.joint);
+        if (jfcComp)
+        {
+            auto &forceCmd = jfcComp->Data();
+            forceCmd[0] = torque;
+        }
+        else
+        {
+            gzerr << "JointForceCmd component missing for joint [" << control.jointName << "]\n";
+        }
+    }
 
     // Update parameters
     this->impl->pGain.Update();
