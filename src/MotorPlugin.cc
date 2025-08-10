@@ -13,7 +13,7 @@
 
    You should have received a copy of the GNU Lesser General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
- */
+*/
 
 #include "MotorPlugin.hh"
 
@@ -42,8 +42,9 @@
 #include <gz/math/Filter.hh>
 #include <gz/transport/Node.hh>
 #include <gz/transport/parameters.hh>
+#include <gz/msgs/double.pb.h>
 
-#include <google/protobuf/message.h>
+
 #include <string>
 #include "Util.hh"
 
@@ -65,7 +66,7 @@ class Control
 	/// \brief The PWM channel used to command this control
 	public: int channel = 0;
 
-  /// \brief name of the joint being controlled
+	/// \brief name of the joint being controlled
 	public: std::string jointName;
 
 	/// \brief battery voltage
@@ -83,193 +84,83 @@ class Control
 	/// \brief A multiplier to scale the raw input command
 	public: double multiplier;
 
-  /// \brief An offset to shift the zero-point of the raw input command
+	/// \brief An offset to shift the zero-point of the raw input command
 	public: double offset;
 
 	/// \brief joint being controlled
 	public: gz::sim::Entity joint;
 
 	/// \brief Publisher for publishing current
-	public: gz::transport::Node::Publisher pub_c;
+	public: gz::transport::Node::Publisher currentPub;
 
+	////// for debugging
 	/// \brief Publisher for voltage 
-	public: gz::transport::Node::Publisher pub_v;
+	// public: gz::transport::Node::Publisher voltPub;
 
-};
-
-//////////////////////////////////////////////////
-//! \brief Utility to declare and update a parameter
-template <typename T>
-class ParameterProxy
-{
-  //! \brief Constructor
-  public: ParameterProxy(const std::string_view& _name) : name(_name)
-  {}
-
-  //! \brief Initialise
-  public: template<typename Getter, typename Setter>
-  void Init(
-    gz::transport::parameters::ParametersRegistry * _registry,
-    T * _obj,
-    Getter&& _getter,
-    Setter&& _setter,
-    const std::string_view& _prefix)
-  {
-    this->registry = _registry;
-    this->obj = _obj;
-    this->getter = std::forward<Getter>(_getter);
-    this->setter = std::forward<Setter>(_setter);
-    this->prefix = _prefix;
-    this->scopedName = std::string(this->prefix) + std::string(this->name);
-  }
-
-  //! \brief Declare the parameter to the registry
-  public: void Declare()
-  {
-    if (this->registry == nullptr)
-    {
-      gzerr << "Uninitialised parameter " << this->scopedName << std::endl;
-      return;
-    }
-    auto value = std::make_unique<gz::msgs::Double>();
-    value->set_data(this->getter(*obj));
-    auto result = this->registry->DeclareParameter(
-        this->scopedName, std::move(value));
-  }
-
-  //! \brief Update the parameter from the registry
-  public: void Update()
-  {
-    if (this->registry == nullptr)
-    {
-      return;
-    }
-    const double change_tolerance{1.0e-8};
-
-    auto value = std::make_unique<gz::msgs::Double>();
-    auto result = this->registry->Parameter(scopedName, *value);
-    if (result.ResultType() ==
-        gz::transport::parameters::ParameterResultType::Success)
-    {
-      const double a = this->getter(*obj);
-      const double b = value->data();
-      const bool changed = !math::equal(a, b, change_tolerance);
-      if (changed)
-      {
-        this->setter(*obj, b);
-        gzdbg << "Parameter " << this->scopedName << " updated from "
-              << a << " to " << b << std::endl;
-      }
-    }
-    else
-    {
-      gzerr << "Failed to get parameter [" << this->scopedName << "] :"
-            << result << std::endl;
-    }
-  }
-
-  private: gz::transport::parameters::ParametersRegistry * registry{nullptr};
-  private: T * obj{nullptr};
-  private: std::function<double(const T&)> getter;
-  private: std::function<void(T&, double)> setter;
-  private: std::string_view prefix;
-  private: std::string_view name;
-  private: std::string scopedName;
 };
 
 //////////////////////////////////////////////////
 class MotorPlugin::Impl
 { 
-  //
-  public: void OnPwmMsg(const google::protobuf::Message &_msg,
-                        const gz::transport::MessageInfo &_info);
-  
-  //! Helper to initialise and declare a PID parameter
-  public: template<typename Getter, typename Setter>
-  void DeclareParameter(
-      ParameterProxy<math::PID>& param,
-      Getter&& getter,
-      Setter&& setter,
-      const std::string& prefix)
-  {
-    param.Init(registry, &pid,
-      std::forward<Getter>(getter),
-      std::forward<Setter>(setter),
-      prefix);
-    param.Declare();
-  }
-  /// \brief World occupied by the parent model.
-  public: World world{kNullEntity};
-  
-  /// \brief Name of the world entity.
-  public: std::string worldName;
+	/// \brief Callback for subscription for Velocity msg .
+	///
+	/// \param controlIndex -> Index of the message 
+	/// \param _msg -> message itself.
+  	/// The command message is a target Velocity.
+	public: void OnVelMsg(int controlIndex, const gz::msgs::Double &_msg);
 
-  /// \brief Model entity of Motor Model.
-  public: Model parentModel{kNullEntity};
+	/// \brief World occupied by the parent model.
+	public: World world{kNullEntity};
+	
+	/// \brief Name of the world entity.
+	public: std::string worldName;
 
-  /// \brief Name of the model entity.
-  public: std::string parentModelName;
+	/// \brief Model entity of Motor Model.
+	public: Model parentModel{kNullEntity};
 
-  /// \brief Array of controllers
-  public: std::vector<Control> controls;
+	/// \brief Name of the model entity.
+	public: std::string parentModelName;
 
-  /// \brief Array of pwm command topics
-  public: std::vector<std::string> topics;
-  
-  ///
-  public: std::string joint_name_;
-  
-  ///
-  public: gz::sim::Entity joint_entity_ = gz::sim::kNullEntity;
+	/// \brief Array of controllers
+	public: std::vector<Control> controls;
 
-  /// \brief Array of subscribers for PWM topics
-  public: std::vector<gz::transport::Node::Subscriber> subscribers;
-  
-  /// \brief Store PWM values indexed by channel
-  public: std::map<std::string, std::string> pwmValues;
-  
-  /// \brief Mutex to protect PWM values
-  public: std::mutex pwmMutex;
+	/// \brief Array of msg command topics.
+	public: std::vector<std::string> topics;
 
-  //
-  public: bool validConfig{false};
+	/// \brief Stores target velocity values.
+	public: std::vector<double> velValues;
+	
+	/// \brief Mutex to protect velValues
+	public: std::mutex velMutex;
 
-  //
-  gz::transport::Node node;
+	/// \brief Check to see if the config is valid  
+	public: bool validConfig{false};
 
-  /// \brief Joint Entity
-  public: Joint joint{kNullEntity};
+	/// \brief gz-transport Node to subscribe to velValues data coming from ArduPilotPlugin
+	gz::transport::Node node;
 
-   /// \brief Position PID controller.
-  public: math::PID pid;
-
-  /// \brief Parameters registry
-  public: transport::parameters::ParametersRegistry * registry;
-
-  /// Dynamic parameters
-  public: ParameterProxy<math::PID> pGain{"p_gain"};
-  public: ParameterProxy<math::PID> iGain{"i_gain"};
-  public: ParameterProxy<math::PID> dGain{"d_gain"};
-  public: ParameterProxy<math::PID> iMax{"i_max"};
-  public: ParameterProxy<math::PID> iMin{"i_min"};
-  public: ParameterProxy<math::PID> cmdMax{"cmd_max"};
-  public: ParameterProxy<math::PID> cmdMin{"cmd_min"};
-
+	/// \brief Joint Entity
+	public: Joint joint{kNullEntity};
 };
 
 //////////////////////////////////////////////////
-void MotorPlugin::Impl::OnPwmMsg(const google::protobuf::Message &_msg,
-                                 const gz::transport::MessageInfo &_info)
+void MotorPlugin::Impl::OnVelMsg(int controlIndex, const gz::msgs::Double &_msg)
 {
-  std::lock_guard<std::mutex> lock(this->pwmMutex);
-  const gz::msgs::Double* doubleMsg = dynamic_cast<const gz::msgs::Double*>(&_msg);
-  if (doubleMsg) {
-    this->pwmValues[_info.Topic()] = std::to_string(doubleMsg->data());
-  }
+	std::lock_guard<std::mutex> lock(this->velMutex);
+
+	// Bounds checking
+	if (controlIndex >= 0 && controlIndex < static_cast<int>(this->velValues.size()))
+	{
+		this->velValues[controlIndex] = _msg.data();
+	}
+	else
+	{
+		gzwarn << "Invalid control index " << controlIndex << " for PWM message. Expected [0, " 
+			<< (this->velValues.size() - 1) << "]" << std::endl;
+	}
 }
 
 
-//////////////////////////////////////////////////
 //////////////////////////////////////////////////
 MotorPlugin::~MotorPlugin() = default;
 
@@ -312,7 +203,8 @@ void MotorPlugin::Configure(
   // Load control channel params
   this->LoadControlChannels(sdfClone, _ecm);
 
-  this->impl->pid.Init(0.02, 0, 0.0, 0, 0, 0.18, -0.18);
+  // Initialize msg values vector for safety
+  this->impl->velValues.resize(this->impl->controls.size(), 0.0);
 
   // create components and subscriptions.
   for (int i = 0; i < this->impl->controls.size(); ++i)
@@ -331,48 +223,19 @@ void MotorPlugin::Configure(
 
     // Subscriber
     std::string topic = this->impl->topics[i];
-    this->impl->node.Subscribe(
-            topic,
-            &MotorPlugin::Impl::OnPwmMsg, this->impl.get());
+    this->impl->node.Subscribe<gz::msgs::Double>(
+        topic,
+        [this, i](const gz::msgs::Double &_msg, const gz::transport::MessageInfo &_info) {
+            this->impl->OnVelMsg(i, _msg);
+        });
 
-    gzdbg << "MotorPlugin subscribing to messages on [" << topic << "]\n";
+    gzdbg << "MotorPlugin subscribing to PWM messages on [" << topic 
+          << "] for control index " << i << std::endl;
   }
   this->impl->validConfig = true;
 
 }
 
-
-//////////////////////////////////////////////////
-void MotorPlugin::ConfigureParameters(
-    gz::transport::parameters::ParametersRegistry &_registry,
-    gz::sim::EntityComponentManager &_ecm)
-{
-  this->impl->registry = &_registry;
-
-  std::string scopedName = gz::sim::scopedName(
-    this->impl->joint.Entity(), _ecm, ".", false);
-  std::string prefix = std::string("MotorPlugin") + scopedName
-    + std::string(".");
-
-  //! @note not using gz::msgs::PID because the message does not support all
-  //!       fields available in gz::math::PID (cmd_max, cmd_min, cmd_offset)
-
-  // Declare parameter proxies
-  this->impl->DeclareParameter(this->impl->pGain,
-      &math::PID::PGain, &math::PID::SetPGain, prefix);
-  this->impl->DeclareParameter(this->impl->iGain,
-      &math::PID::IGain, &math::PID::SetIGain, prefix);
-  this->impl->DeclareParameter(this->impl->dGain,
-      &math::PID::DGain, &math::PID::SetDGain, prefix);
-  this->impl->DeclareParameter(this->impl->iMax,
-      &math::PID::IMax, &math::PID::SetIMax, prefix);
-  this->impl->DeclareParameter(this->impl->iMin,
-      &math::PID::IMin, &math::PID::SetIMin, prefix);
-  this->impl->DeclareParameter(this->impl->cmdMax,
-      &math::PID::CmdMax, &math::PID::SetCmdMax, prefix);
-  this->impl->DeclareParameter(this->impl->cmdMin,
-      &math::PID::CmdMin, &math::PID::SetCmdMin, prefix);
-}
 /////////////////////////////////////////////////
 void MotorPlugin::LoadControlChannels(
     sdf::ElementPtr _sdf,
@@ -395,10 +258,9 @@ void MotorPlugin::LoadControlChannels(
     }
     else
     {
-      // this->impl->channel = this->
-      gzwarn << "[" /*<< this->impl->modelName*/ << "] "
+      gzwarn << "[" << this->impl->parentModelName << "] "
              <<  "id/channel attribute not specified, use order parsed ["
-             /* << control.channel */ << "].\n";
+             << control.channel << "].\n";
     }
 
     // parameters
@@ -502,39 +364,15 @@ void MotorPlugin::LoadControlChannels(
       return;
     }
 
-    if (controlSdf->HasElement("p_gain"))
-    {
-      this->impl->pid.SetPGain(controlSdf->Get<double>("p_gain"));
-    }
-    if (controlSdf->HasElement("i_gain"))
-    {
-      this->impl->pid.SetPGain(controlSdf->Get<double>("i_gain"));
-    }if (controlSdf->HasElement("d_gain"))
-    {
-      this->impl->pid.SetPGain(controlSdf->Get<double>("d_gain"));
-    }if (controlSdf->HasElement("i_max"))
-    {
-      this->impl->pid.SetPGain(controlSdf->Get<double>("i_max"));
-    }if (controlSdf->HasElement("i_min"))
-    {
-      this->impl->pid.SetPGain(controlSdf->Get<double>("i_min"));
-    }if (controlSdf->HasElement("cmd_max"))
-    {
-      this->impl->pid.SetPGain(controlSdf->Get<double>("cmd_max"));
-    }if (controlSdf->HasElement("cmd_min"))
-    {
-      this->impl->pid.SetPGain(controlSdf->Get<double>("cmd_min"));
-    }
+	
+    std::string cmdTopicCurrent;
+    cmdTopicCurrent = control.jointName + "/current";
+    control.currentPub = this->impl->node.Advertise<msgs::Double>(cmdTopicCurrent);
 
-    std::string cmdTopic;
-
-    cmdTopic = control.jointName + "/current";
-    control.pub_c = this->impl->node.Advertise<msgs::Double>(cmdTopic);
-
-    std::string cmdTopicVoltage;
-
-    cmdTopicVoltage = control.jointName + "/voltage";
-    control.pub_v = this->impl->node.Advertise<msgs::Double>(cmdTopicVoltage);
+	
+    // std::string cmdTopicVoltage;
+    // cmdTopicVoltage = control.jointName + "/voltage";
+    // control.voltPub = this->impl->node.Advertise<msgs::Double>(cmdTopicVoltage);
 
 
     this->impl->controls.push_back(control);
@@ -555,7 +393,7 @@ void MotorPlugin::PreUpdate(
     for (size_t i = 0; i < this->impl->controls.size(); ++i)
     {
         auto &control = this->impl->controls[i];
-        double vel = 0.0;
+        double targetSpeed = 0.0;
         
         auto joint_vel_comp = _ecm.Component<gz::sim::components::JointVelocity>(control.joint);
         if (!joint_vel_comp)
@@ -571,29 +409,15 @@ void MotorPlugin::PreUpdate(
             continue;
         }
 
-        // current joint speed (rpm)
-        double currOmega = velocities[0];
-        
-        std::string topic = "/" + this->impl->topics[i];
-        std::lock_guard<std::mutex> lock(this->impl->pwmMutex);
-        auto it = this->impl->pwmValues.find(topic);
-        if (it != this->impl->pwmValues.end())
+        // current joint speed (rad/s)
+        double currSpeed = velocities[0];
         {
-        try
-        {
-            vel = std::stod(it->second);
-        }
-        catch (const std::exception &e)
-        {
-            gzwarn << "Failed to convert PWM value for topic [" << topic << "]: " << e.what() << "\n";
-            vel = 0.0;
-        }
-        }
-
-        double targetOmega = vel;
+			std::lock_guard<std::mutex> lock(this->impl->velMutex);
+			targetSpeed = this->impl->velValues[i];
+		}
 
     
-        if (std::abs(vel) < 0.1) 
+        if (std::abs(targetSpeed) < 0.1) 
         {
             // gzdbg << "Zero rad/s PWM from topic, setting torque to 0\n";
             auto jfcComp = _ecm.Component<gz::sim::components::JointForceCmd>(control.joint);
@@ -608,40 +432,31 @@ void MotorPlugin::PreUpdate(
             continue;
         }
     
-        double velError = currOmega - targetOmega;
-        double torque = this->impl->pid.Update(
-        velError, _info.dt);
-            
         double kv = (control.speedConstant * (2.0 * M_PI)) / 60.0;
-        double true_pwm = (vel / control.multiplier) - control.offset;
+        double pwm = (targetSpeed / control.multiplier) - control.offset;
         
-        double voltage = control.voltageBat * true_pwm;
+        double voltage = control.voltageBat * pwm;
     
-        double backEmfV = currOmega / kv ;  // Ω/KV
+        double backEmfV = currSpeed / kv ;  // Ω/KV
         double current = (voltage - backEmfV) / control.resistance;
     
-        msgs::Double cmd;
-        cmd.set_data(current);
-        control.pub_c.Publish(cmd);
+        msgs::Double cmdCurr;
+        cmdCurr.set_data(current);
+        control.currentPub.Publish(cmdCurr);
 
         // voltage output
-        // msgs::Double cmd_v;
-        // cmd_v.set_data(voltage);
-        // control.pub_v.Publish(cmd_v);
+        // msgs::Double cmdVolt;
+        // cmdVolt.set_data(voltage);
+        // control.voltPub.Publish(cmdVolt);
         
-        ////////////////////////////////////////////////// -> motor model eqns.
-        // if (current >= control.noLoadCurrent)
-        // {
-        //   torque = (current - control.noLoadCurrent) / kv;
-        // }
-        // else
-        // {
-        //   torque = (current + control.noLoadCurrent) / kv;
-        // }
-        /////////////////////////////////////////////////
-
-
-        // gzdbg << "Curr Speed:- " << currOmega << " Pwm:- "<< true_pwm << " Torque:- " << torque << " Voltage:- " << voltage << " Current:- " << current << "\n";
+        double torque = 0.0;
+        if (std::abs(current) > control.noLoadCurrent)
+        {
+          torque = (current - (current > 0 ? 1 : -1) * control.noLoadCurrent) / kv;
+        }
+        
+		// debugging
+        gzdbg << "Index:- " << i << " Curr Speed:- " << currSpeed << " Pwm:- "<< pwm << " Torque:- " << torque << " Voltage:- " << voltage << " Current:- " << current << "\n";
 
         // Apply torque to joint
         auto jfcComp = _ecm.Component<gz::sim::components::JointForceCmd>(control.joint);
@@ -655,15 +470,6 @@ void MotorPlugin::PreUpdate(
             gzerr << "JointForceCmd component missing for joint [" << control.jointName << "]\n";
         }
     }
-
-    // Update parameters
-    this->impl->pGain.Update();
-    this->impl->iGain.Update();
-    this->impl->dGain.Update();
-    this->impl->iMax.Update();
-    this->impl->iMin.Update();
-    this->impl->cmdMax.Update();
-    this->impl->cmdMin.Update();
 }
 
 
@@ -677,7 +483,6 @@ void MotorPlugin::PreUpdate(
 GZ_ADD_PLUGIN(
     gz::sim::systems::MotorPlugin,
     gz::sim::System,
-    gz::sim::systems::MotorPlugin::ISystemConfigureParameters,
     gz::sim::systems::MotorPlugin::ISystemConfigure,
     gz::sim::systems::MotorPlugin::ISystemPreUpdate)
 

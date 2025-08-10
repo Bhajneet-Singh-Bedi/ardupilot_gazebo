@@ -90,9 +90,9 @@
         <child>rotor</child>
         <axis>
           <xyz>0 0 1</xyz>
-          <!-- <dynamics>
-            <damping>0.05</damping>
-          </dynamics> -->
+          <dynamics>
+            <damping>1.0e-5</damping>
+          </dynamics>
         </axis>
       </joint>
 
@@ -108,19 +108,13 @@
         <cma_stall>0.0</cma_stall>
         <area>0.002</area>
         <air_density>1.2041</air_density>
-        <cp>-0.084 0 0</cp>
+        <cp>0.084 0 0</cp>
         <forward>0 1 0</forward>
         <upward>0 0 1</upward>
         <link_name>rotor</link_name>
       </plugin>
 
 
-      <!-- <plugin
-        filename="gz-sim-joint-controller-system"
-        name="gz::sim::systems::JointController">
-        <joint_name>joint_0</joint_name>
-        <initial_velocity>1.0</initial_velocity>
-      </plugin> -->
       <plugin filename="gz-sim-joint-state-publisher-system"
         name="gz::sim::systems::JointStatePublisher">
       </plugin>

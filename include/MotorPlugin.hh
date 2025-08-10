@@ -29,7 +29,6 @@ namespace systems {
 
 class MotorPlugin :
     public System,
-    public ISystemConfigureParameters,
     public ISystemPreUpdate,
     public ISystemConfigure
 {
@@ -48,10 +47,6 @@ class MotorPlugin :
                          const std::shared_ptr<const sdf::Element> &_sdf,
                          EntityComponentManager &_ecm,
                          EventManager &) final;
-  
-  public: void ConfigureParameters(
-      gz::transport::parameters::ParametersRegistry &_registry,
-      gz::sim::EntityComponentManager &_ecm) override;
 
   /// \brief Load control channels
   private: void LoadControlChannels(
