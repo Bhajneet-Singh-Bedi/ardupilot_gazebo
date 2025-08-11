@@ -435,6 +435,10 @@ void MotorPlugin::PreUpdate(
         double kv = (control.speedConstant * (2.0 * M_PI)) / 60.0;
         double pwm = (targetSpeed / control.multiplier) - control.offset;
         
+        if (targetSpeed < 0)
+        {
+          pwm = -pwm;
+        }
         double voltage = control.voltageBat * pwm;
     
         double backEmfV = currSpeed / kv ;  // Ω/KV
@@ -455,8 +459,8 @@ void MotorPlugin::PreUpdate(
           torque = (current - (current > 0 ? 1 : -1) * control.noLoadCurrent) / kv;
         }
         
-		// debugging
-        gzdbg << "Index:- " << i << " Curr Speed:- " << currSpeed << " Pwm:- "<< pwm << " Torque:- " << torque << " Voltage:- " << voltage << " Current:- " << current << "\n";
+		    // debugging
+        // gzdbg << "Index:- " << i << " Curr Speed:- " << currSpeed << " Pwm:- "<< pwm << " Torque:- " << torque << " Voltage:- " << voltage << " Current:- " << current << "\n";
 
         // Apply torque to joint
         auto jfcComp = _ecm.Component<gz::sim::components::JointForceCmd>(control.joint);
