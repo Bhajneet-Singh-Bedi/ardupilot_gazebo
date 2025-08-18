@@ -412,25 +412,25 @@ void MotorPlugin::PreUpdate(
         // current joint speed (rad/s)
         double currSpeed = velocities[0];
         {
-			std::lock_guard<std::mutex> lock(this->impl->velMutex);
-			targetSpeed = this->impl->velValues[i];
-		}
+          std::lock_guard<std::mutex> lock(this->impl->velMutex);
+          targetSpeed = this->impl->velValues[i];
+        }
 
     
-        if (std::abs(targetSpeed) < 0.1) 
-        {
-            // gzdbg << "Zero rad/s PWM from topic, setting torque to 0\n";
-            auto jfcComp = _ecm.Component<gz::sim::components::JointForceCmd>(control.joint);
-            if (jfcComp)
-            {
-                auto &forceCmd = jfcComp->Data();
-                if (!forceCmd.empty())
-                {
-                    forceCmd[0] = 0.0;
-                }
-            }
-            continue;
-        }
+        // if (std::abs(targetSpeed) < 0.1) 
+        // {
+        //     // gzdbg << "Zero rad/s PWM from topic, setting torque to 0\n";
+        //     auto jfcComp = _ecm.Component<gz::sim::components::JointForceCmd>(control.joint);
+        //     if (jfcComp)
+        //     {
+        //         auto &forceCmd = jfcComp->Data();
+        //         if (!forceCmd.empty())
+        //         {
+        //             forceCmd[0] = 0.0;
+        //         }
+        //     }
+        //     continue;
+        // }
     
         double kv = (control.speedConstant * (2.0 * M_PI)) / 60.0;
         double pwm = (targetSpeed / control.multiplier) - control.offset;
@@ -459,8 +459,9 @@ void MotorPlugin::PreUpdate(
           torque = (current - (current > 0 ? 1 : -1) * control.noLoadCurrent) / kv;
         }
         
+        currSpeed = (currSpeed * 60.0) / (2.0 * M_PI); // rad/s -> rpm
 		    // debugging
-        // gzdbg << "Index:- " << i << " Curr Speed:- " << currSpeed << " Pwm:- "<< pwm << " Torque:- " << torque << " Voltage:- " << voltage << " Current:- " << current << "\n";
+        gzdbg << "Index:- " << i << " TargetS:- " << targetSpeed << " Curr Speed:- " << currSpeed << " Pwm:- "<< pwm << " Torque:- " << torque << " Voltage:- " << voltage << " Current:- " << current << "\n";
 
         // Apply torque to joint
         auto jfcComp = _ecm.Component<gz::sim::components::JointForceCmd>(control.joint);
