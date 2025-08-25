@@ -38,13 +38,11 @@
 #include <gz/sim/Model.hh>
 #include <gz/sim/World.hh>
 #include <gz/sim/Util.hh>
-#include <gz/math/PID.hh>
 #include <gz/math/Filter.hh>
 #include <gz/transport/Node.hh>
 #include <gz/transport/parameters.hh>
 #include <gz/msgs/double.pb.h>
-
-
+#include <ardupilot_gazebo/msgs/motor_stats.pb.h> 
 #include <string>
 #include "Util.hh"
 
@@ -76,7 +74,10 @@ class Control
 	public: double speedConstant;
 
 	/// \brief motor internal resistance  
-	public: double resistance;
+	public: double internal_resistance;
+
+    /// \brief dynamic motor resistance while working
+    public: double resistance;
 
 	/// \brief no load current of motor 
 	public: double noLoadCurrent;
@@ -87,11 +88,23 @@ class Control
 	/// \brief An offset to shift the zero-point of the raw input command
 	public: double offset;
 
+	/// \brief thermal resistance of the motor
+		public: double thermal_resistance;
+
+	/// \brief thermal capacitance of the motor
+	public: double thermal_capacitance;
+
+	/// \brief ambient working temperature 
+	public: double ambient_temperature;
+
+	/// \brief Motor temperature 
+	public: double temperature;
+
 	/// \brief joint being controlled
 	public: gz::sim::Entity joint;
 
-	/// \brief Publisher for publishing current
-	public: gz::transport::Node::Publisher currentPub;
+	/// \brief Publisher for motor stats
+	public: gz::transport::Node::Publisher motorStatsPub;
 
 	////// for debugging
 	/// \brief Publisher for voltage 
@@ -311,7 +324,7 @@ void MotorPlugin::LoadControlChannels(
   
     if (controlSdf->HasElement("resistance"))
     {
-      control.resistance = controlSdf->Get<double>("resistance");
+      control.internal_resistance = controlSdf->Get<double>("resistance");
     }
     else
     {
@@ -364,16 +377,41 @@ void MotorPlugin::LoadControlChannels(
       return;
     }
 
-	
-    std::string cmdTopicCurrent;
-    cmdTopicCurrent = control.jointName + "/current";
-    control.currentPub = this->impl->node.Advertise<msgs::Double>(cmdTopicCurrent);
+    if (controlSdf->HasElement("thermal_resistance"))
+    {
+      control.thermal_resistance = controlSdf->Get<double>("thermal_resistance");
+    }
+    else
+    {
+      gzerr << "MotorPlugin requires parameter 'thermal_resistance'. "
+               "Failed to initialize.\n";
+      return;
+    }
 
-	
-    // std::string cmdTopicVoltage;
-    // cmdTopicVoltage = control.jointName + "/voltage";
-    // control.voltPub = this->impl->node.Advertise<msgs::Double>(cmdTopicVoltage);
+    if (controlSdf->HasElement("thermal_capacitance"))
+    {
+      control.thermal_capacitance = controlSdf->Get<double>("thermal_capacitance");
+    }
+    else
+    {
+      gzerr << "MotorPlugin requires parameter 'thermal_capacitance'. "
+               "Failed to initialize.\n";
+      return;
+    }
 
+    if (controlSdf->HasElement("ambient_temperature"))
+    {
+      control.ambient_temperature = controlSdf->Get<double>("ambient_temperature");
+    }
+    else
+    {
+      gzerr << "MotorPlugin requires parameter 'ambient_temperature'. "
+               "Failed to initialize.\n";
+      return;
+    }
+
+    std::string motorStatsTopic = "/model/" + this->impl->parentModelName + "/joint/" + control.jointName + "/motor_stats";
+    control.motorStatsPub = this->impl->node.Advertise<ardupilot_gazebo::msgs::MotorStats>(motorStatsTopic);
 
     this->impl->controls.push_back(control);
     controlSdf = controlSdf->GetNextElement("control");
@@ -416,22 +454,6 @@ void MotorPlugin::PreUpdate(
           targetSpeed = this->impl->velValues[i];
         }
 
-    
-        // if (std::abs(targetSpeed) < 0.1) 
-        // {
-        //     // gzdbg << "Zero rad/s PWM from topic, setting torque to 0\n";
-        //     auto jfcComp = _ecm.Component<gz::sim::components::JointForceCmd>(control.joint);
-        //     if (jfcComp)
-        //     {
-        //         auto &forceCmd = jfcComp->Data();
-        //         if (!forceCmd.empty())
-        //         {
-        //             forceCmd[0] = 0.0;
-        //         }
-        //     }
-        //     continue;
-        // }
-    
         double kv = (control.speedConstant * (2.0 * M_PI)) / 60.0;
         double pwm = (targetSpeed / control.multiplier) - control.offset;
         
@@ -442,26 +464,60 @@ void MotorPlugin::PreUpdate(
         double voltage = control.voltageBat * pwm;
     
         double backEmfV = currSpeed / kv ;  // Ω/KV
-        double current = (voltage - backEmfV) / control.resistance;
-    
-        msgs::Double cmdCurr;
-        cmdCurr.set_data(current);
-        control.currentPub.Publish(cmdCurr);
-
-        // voltage output
-        // msgs::Double cmdVolt;
-        // cmdVolt.set_data(voltage);
-        // control.voltPub.Publish(cmdVolt);
         
+        // R_T = R_0 * (1 + a(T - T_0))
+        // a -> alpha (temperature coefficient for copper is 0.00393)
+        // T_0 -> reference temperature taken as ambient temperature for simplicity
+        control.resistance = control.internal_resistance * (1.0 + 0.00393 * (control.temperature - control.ambient_temperature));
+        double current = (voltage - backEmfV) / control.resistance;
+      
         double torque = 0.0;
         if (std::abs(current) > control.noLoadCurrent)
         {
           torque = (current - (current > 0 ? 1 : -1) * control.noLoadCurrent) / kv;
         }
         
+        // Temperature calculation
+        // Parameter calcultion
+            // P_loss = P_resistive + P_friction
+            // P_resistance = I^2 * R = 16.37^2 * 0.115;
+            // P_friction = i_0 * v_m; (no load current and backemf)
+            // so P_loss = 39.38W (at full throttle)
+
+            // R_th = (T - T_amb)/P_loss = (80 - 25)/39.38 = 1.40 deg C
+            // C_th = t/R_th = 300/1.40 = 214.28 (t -> tau (thermal time constant), estimated from datasheet)
+        // temperature eqns
+            // dT/dt = P_loss/C_th - (T - T_amb)/(R_th*C_th)
+            // C_th -> thermal capacitance, r_th -> therma resistance
+            // T -> current motor temperature
+            // T_amb -> ambient temperature
+        
+        double p_resistive = std::pow(std::abs(current), 2) * control.resistance;
+        double p_friction = control.noLoadCurrent * std::abs(backEmfV);
+        double p_loss = p_resistive + p_friction;
+        double dt = std::chrono::duration<double>(_info.dt).count();
+        double dT_dt = (p_loss / control.thermal_capacitance) - ((control.temperature - control.ambient_temperature) / (control.thermal_resistance * control.thermal_capacitance));
+        control.temperature += dT_dt * dt;
+        if (control.temperature < control.ambient_temperature) {
+            control.temperature = control.ambient_temperature;
+        }
+
         currSpeed = (currSpeed * 60.0) / (2.0 * M_PI); // rad/s -> rpm
-		    // debugging
-        gzdbg << "Index:- " << i << " TargetS:- " << targetSpeed << " Curr Speed:- " << currSpeed << " Pwm:- "<< pwm << " Torque:- " << torque << " Voltage:- " << voltage << " Current:- " << current << "\n";
+
+        // Publish motor stats
+        ardupilot_gazebo::msgs::MotorStats motorStatsMsg;
+        motorStatsMsg.set_motor_id(control.channel);
+        motorStatsMsg.set_rpm(currSpeed);
+        motorStatsMsg.set_voltage(voltage);
+        motorStatsMsg.set_current(current);
+		motorStatsMsg.set_temperature(control.temperature);
+        if (!control.motorStatsPub.Publish(motorStatsMsg))
+        {
+          gzerr << "Failed to publish motor stats for joint [" << control.jointName << "]\n";
+        }
+
+	    // debugging
+        gzdbg << "Index:- " << i << " TargetS:- " << targetSpeed << " Curr Speed:- " << currSpeed << " Pwm:- "<< pwm << " Torque:- " << torque << " Voltage:- " << voltage << " Current:- " << current << " Temperature:- " << control.temperature << "\n";
 
         // Apply torque to joint
         auto jfcComp = _ecm.Component<gz::sim::components::JointForceCmd>(control.joint);
